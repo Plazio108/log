@@ -1,12 +1,14 @@
 import importlib.util
-import time
+import json
 import logging
+import time
 from typing import cast
 
 from gleaf import BaseCanvas, TerminalCanvas
 from gleaf.styles import Modifiers
+from oakey import Empty, KeyListener, Keys
+
 from greetd_ipc import GreetdClient, GreetdError
-from oakey.listener import KeyListener, Keys, Empty
 
 # ==========================================
 # 0. LOGGING SETUP
@@ -22,6 +24,10 @@ logger = logging.getLogger("engine")
 # ==========================================
 # 1. THE OMNI-CONFIG
 # ==========================================
+
+# with open("config.json") as conf:
+#     CONFIG = json.load(conf)
+
 CONFIG = {
     "engine": {
         "target_fps": 30,
