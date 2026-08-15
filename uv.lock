@@ -1,0 +1,28 @@
+version = 1
+revision = 3
+requires-python = ">=3.13"
+
+[[package]]
+name = "gleaf"
+version = "0.1.0"
+source = { git = "ssh://git@github.com/Plazio108/gleaf.git#f76a08212c015ca5baffbb73e924fba43d900560" }
+
+[[package]]
+name = "log"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "gleaf" },
+    { name = "oakey" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "gleaf", git = "ssh://git@github.com/Plazio108/gleaf.git" },
+    { name = "oakey", git = "ssh://git@github.com/Plazio108/oakey.git" },
+]
+
+[[package]]
+name = "oakey"
+version = "0.1.0"
+source = { git = "ssh://git@github.com/Plazio108/oakey.git#51e8a414859f13bc8f1cd335860ea75022c9db99" }
