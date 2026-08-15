@@ -31,44 +31,49 @@ echo "[+] Updating core application files..."
 for item in "$CURRENT_DIR"/*; do
     item_name=$(basename "$item")
     
-    # Skip copying git files
     if [ "$item_name" = ".git" ]; then
         continue
     fi
 
-    # If the folder is 'plugins' or 'assets' and already exists in /opt/, DO NOT overwrite it
     if ([ "$item_name" = "plugins" ] || [ "$item_name" = "assets" ]) && [ -d "$INSTALL_DIR/$item_name" ]; then
         echo "[~] Preserving existing '$item_name' directory..."
         continue
     fi
 
-    # Otherwise, copy/update the file or folder
     rm -rf "$INSTALL_DIR/$item_name"
     cp -r "$item" "$INSTALL_DIR/"
 done
 
-# 4. Ensure plugins and assets folders exist (even if they weren't in the git repo)
 mkdir -p "$INSTALL_DIR/plugins"
 mkdir -p "$INSTALL_DIR/assets"
+
+# 4. Ensure 'uv' is installed on the system (required for git-based dependencies)
+if ! command -v uv &> /dev/null; then
+    echo "[+] Installing uv for dependency management..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+fi
+
+# Locate uv binary (defaults to root's cargo bin when run with sudo)
+UV_BIN="${HOME}/.cargo/bin/uv"
+if [ ! -f "$UV_BIN" ] && command -v uv &> /dev/null; then
+    UV_BIN="uv"
+fi
 
 # 5. Set up or refresh Python virtual environment
 echo "[+] Managing Python virtual environment..."
 if [ ! -d "$INSTALL_DIR/venv" ]; then
     python3 -m venv "$INSTALL_DIR/venv"
 fi
-"$INSTALL_DIR/venv/bin/pip" install --upgrade pip
 
-if [ -f "$INSTALL_DIR/pyproject.toml" ]; then
-    "$INSTALL_DIR/venv/bin/pip" install "$INSTALL_DIR"
-elif [ -f "$INSTALL_DIR/requirements.txt" ]; then
-    "$INSTALL_DIR/venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
-fi
+# 6. Install project and its Git sources using uv
+echo "[+] Installing project and dependencies via uv..."
+"$UV_BIN" pip install --python "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR"
 
-# 6. Secure permissions
+# 7. Secure permissions
 echo "[+] Setting correct permissions..."
 chown -R root:root "$INSTALL_DIR"
 chmod -R 755 "$INSTALL_DIR"
 
 echo "--------------------------------------------------------"
-echo "[✔] Update complete! Your plugins and assets are safe."
+echo "[✔] Update complete successfully with uv sources!"
 echo "--------------------------------------------------------"
