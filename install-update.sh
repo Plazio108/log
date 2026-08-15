@@ -1,21 +1,17 @@
 #!/bin/bash
-# Exit immediately if a command exits with a non-zero status
 set -e
 
-# Configuration variables
 APP_NAME="log"
 INSTALL_DIR="/opt/$APP_NAME"
 CURRENT_DIR="$(pwd)"
 
-# 1. Ensure the script is run with sudo/root privileges
 if [ "$EUID" -ne 0 ]; then
   echo "[-] Error: This installation script must be run with sudo."
   echo "    Usage: sudo ./install.sh"
   exit 1
 fi
 
-# 2. If this is a git repository, pull the latest changes first
-# Using $SUDO_USER ensures git runs as your normal user, preventing .git permission issues
+# 1. Pull latest code safely as the normal user
 if [ -d "$CURRENT_DIR/.git" ]; then
   echo "[+] Checking for remote updates via Git..."
   if [ -n "$SUDO_USER" ]; then
@@ -25,37 +21,54 @@ if [ -d "$CURRENT_DIR/.git" ]; then
   fi
 fi
 
-echo "[+] Starting installation of $APP_NAME..."
+echo "[+] Starting installation/update of $APP_NAME..."
 
-# 3. Create the system-wide installation directory
+# 2. Create target directory if it doesn't exist
 mkdir -p "$INSTALL_DIR"
 
-# 4. Copy project files from the cloned location to /opt/
-echo "[+] Copying project files to $INSTALL_DIR..."
-cp -r "$CURRENT_DIR"/* "$INSTALL_DIR/"
+# 3. Copy files selectively to preserve plugins and assets
+echo "[+] Updating core application files..."
+for item in "$CURRENT_DIR"/*; do
+    item_name=$(basename "$item")
+    
+    # Skip copying git files
+    if [ "$item_name" = ".git" ]; then
+        continue
+    fi
 
-# 5. Create an isolated Python virtual environment inside /opt
-echo "[+] Setting up Python virtual environment..."
-python3 -m venv "$INSTALL_DIR/venv"
+    # If the folder is 'plugins' or 'assets' and already exists in /opt/, DO NOT overwrite it
+    if ([ "$item_name" = "plugins" ] || [ "$item_name" = "assets" ]) && [ -d "$INSTALL_DIR/$item_name" ]; then
+        echo "[~] Preserving existing '$item_name' directory..."
+        continue
+    fi
+
+    # Otherwise, copy/update the file or folder
+    rm -rf "$INSTALL_DIR/$item_name"
+    cp -r "$item" "$INSTALL_DIR/"
+done
+
+# 4. Ensure plugins and assets folders exist (even if they weren't in the git repo)
+mkdir -p "$INSTALL_DIR/plugins"
+mkdir -p "$INSTALL_DIR/assets"
+
+# 5. Set up or refresh Python virtual environment
+echo "[+] Managing Python virtual environment..."
+if [ ! -d "$INSTALL_DIR/venv" ]; then
+    python3 -m venv "$INSTALL_DIR/venv"
+fi
 "$INSTALL_DIR/venv/bin/pip" install --upgrade pip
 
-# 6. Install project dependencies
 if [ -f "$INSTALL_DIR/pyproject.toml" ]; then
-    echo "[+] Installing project via pyproject.toml..."
     "$INSTALL_DIR/venv/bin/pip" install "$INSTALL_DIR"
 elif [ -f "$INSTALL_DIR/requirements.txt" ]; then
-    echo "[+] Installing dependencies from requirements.txt..."
     "$INSTALL_DIR/venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
-else
-    echo "[!] Warning: No pyproject.toml or requirements.txt found. Skipping dependency installation."
 fi
 
-# 7. Secure file ownership and permissions for the system greeter user
+# 6. Secure permissions
 echo "[+] Setting correct permissions..."
 chown -R root:root "$INSTALL_DIR"
 chmod -R 755 "$INSTALL_DIR"
 
 echo "--------------------------------------------------------"
-echo "[✔] Update and installation completed successfully!"
-echo "[+] Your app is now updated and installed at: $INSTALL_DIR"
+echo "[✔] Update complete! Your plugins and assets are safe."
 echo "--------------------------------------------------------"
