@@ -3,7 +3,7 @@
 set -e
 
 # Configuration variables
-APP_NAME="my-greeter"
+APP_NAME="log"
 INSTALL_DIR="/opt/$APP_NAME"
 CURRENT_DIR="$(pwd)"
 
