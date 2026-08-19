@@ -1,192 +1,182 @@
-from gleaf import BaseCanvas
-
-from engine import BaseWidget
-
 import logging
+import mmap
+import struct
+import time
 
-logger = logging.getLogger("plugin.animated_sprite")
+import lz4.block
+from gleaf import UNSET, BaseCanvas, TerminalTexture
+
+from engine import BACKEND, BaseWidget
+
+logger = logging.getLogger("plugin.sprites")
 
 
 class TransparentSpriteWidget(BaseWidget):
-    """Renders a custom matrix format with true transparency support."""
-
-    def __init__(self, name: str, x, y, z_index: int, matrix: list):
-        super().__init__(name, x, y, z_index)
-        self.matrix = matrix
-
-    def draw(self, canvas: BaseCanvas, config: dict):
-        # Calculate width/height from the matrix
-        w = len(self.matrix[0]) if self.matrix else 0
-        h = len(self.matrix)
-        start_x, start_y = self.get_coords(canvas, w, h, config)
-
-        for dy, row in enumerate(self.matrix):
-            for dx, cell in enumerate(row):
-                if not cell:
-                    continue  # Skip empty data
-
-                c_x = start_x + dx
-                c_y = start_y + dy
-
-                # Fetch what is currently on the canvas at this layer
-                old_char, old_fg, old_bg, old_style = canvas.get_cell(c_x, c_y)
-
-                # Merge new values, falling back to old values if None
-                new_char = cell.get("char")
-                new_char = new_char if new_char is not None else old_char
-
-                new_fg = cell.get("fg")
-                new_fg = tuple(new_fg) if new_fg else old_fg
-
-                new_bg = cell.get("bg")
-                new_bg = tuple(new_bg) if new_bg else old_bg
-
-                new_style = cell.get("style")
-                new_style = new_style if new_style is not None else old_style
-
-                canvas.put_str(c_x, c_y, new_char, new_fg, new_bg, new_style)
-
-
-import json
-import os
-
-
-class AnimatedSpriteWidget(TransparentSpriteWidget):
     """
-    Renders multi-frame JSON animations driven by delta-time updates.
-
-    JSON Schema:
-    {
-        "loop": true,
-        "frames": [
-            {
-                "duration": 0.15,
-                "matrix": [ [ {"char": "a", "fg": [255,0,0], "bg": null, "style": 0}, ... ] ]
-            }
-        ]
-    }
+    Renders an off-screen matrix, .bin file, or raw uncompressed texture bytes.
+    Backward compatible with legacy list-of-dicts matrix formatting.
     """
 
     def __init__(
         self,
         name: str,
-        x: int | str,
-        y: int | str,
+        x,
+        y,
         z_index: int,
-        json_path: str | None = None,
-        loop: bool = True,
+        matrix: list | None = None,
+        bin_path: str | None = None,
+        raw_bytes: bytes | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ):
-        super().__init__(name, x, y, z_index, matrix=[])
-        self.frames: list[dict] = []
-        self.current_frame_idx = 0
-        self.elapsed = 0.0
-        self.loop = loop
-        self.playing = True
+        super().__init__(name, x, y, z_index)
+        self.texture = None
 
-        if json_path:
-            self.load_animation(json_path)
+        if raw_bytes:
+            if width is None or height is None:
+                raise ValueError(
+                    "Both 'width' and 'height' are required when passing 'raw_bytes'."
+                )
+            self.texture = TerminalTexture(
+                width, height, data_buffer=raw_bytes, backend=BACKEND
+            )
 
-    def load_animation(self, json_path: str | dict):
-        if isinstance(json_path, str) and not os.path.exists(json_path):
-            logger.error(f"Animation file not found: {json_path}")
-            self._load_fallback()
-            return
+        elif bin_path:
+            # Reads the SPRT format and grabs just the first frame
+            with open(bin_path, "rb") as f:
+                header = f.read(16)
+                if header.startswith(b"SPRT"):
+                    _, w, h, _, _ = struct.unpack(">4sHHIf", header)
+                    comp_size = struct.unpack(">I", f.read(4))[0]
+                    compressed_frame = f.read(comp_size)
 
-        try:
-            if isinstance(json_path, str):
-                with open(json_path, "r") as f:
-                    data = json.load(f)
-            else:
-                data = json_path
-
-            self.loop = data.get("loop", self.loop)
-            raw_frames = data.get("frames", [])
-
-            processed_frames = []
-            for frame in raw_frames:
-                dur = float(frame.get("duration", 0.1))
-                raw_mat = frame.get("matrix", [])
-
-                # Standardize JSON list colors [r, g, b] into Python tuples (r, g, b)
-                clean_mat = []
-                for row in raw_mat:
-                    clean_row = []
-                    for cell in row:
-                        fg = (
-                            tuple(cell["fg"])
-                            if isinstance(cell.get("fg"), list)
-                            else cell.get("fg")
-                        )
-                        bg = (
-                            tuple(cell["bg"])
-                            if isinstance(cell.get("bg"), list)
-                            else cell.get("bg")
-                        )
-                        clean_row.append(
-                            {
-                                "char": cell.get("char"),
-                                "fg": fg,
-                                "bg": bg,
-                                "style": cell.get("style"),
-                            }
-                        )
-                    clean_mat.append(clean_row)
-                processed_frames.append({"duration": dur, "matrix": clean_mat})
-
-            self.frames = processed_frames
-            if self.frames:
-                self.current_frame_idx = 0
-                self.elapsed = 0.0
-                self.matrix = self.frames[0]["matrix"]
-                self.playing = True
-                logger.debug(f"Loaded {len(self.frames)} frames from {json_path}")
-            else:
-                self._load_fallback()
-
-        except Exception as e:
-            logger.error(f"Failed to parse animation JSON '{json_path}': {e}")
-            self._load_fallback()
-
-    def _load_fallback(self):
-        # 2x2 fallback warning block
-        self.matrix = [
-            [{"char": "!", "fg": (255, 0, 0), "bg": None, "style": 1}] * 2,
-            [{"char": "!", "fg": (255, 0, 0), "bg": None, "style": 1}] * 2,
-        ]
-        self.frames = [{"duration": 1.0, "matrix": self.matrix}]
-        self.playing = False
-
-    def update(self, dt: float, engine):
-        if not self.playing or not self.frames:
-            return
-
-        self.elapsed += dt
-        current_frame = self.frames[self.current_frame_idx]
-        frame_dur = current_frame["duration"]
-
-        if self.elapsed >= frame_dur:
-            self.elapsed -= frame_dur
-            self.current_frame_idx += 1
-
-            if self.current_frame_idx >= len(self.frames):
-                if self.loop:
-                    self.current_frame_idx = 0
+                    uncompressed_bytes = lz4.block.decompress(
+                        compressed_frame, uncompressed_size=w * h * 24
+                    )
+                    self.texture = TerminalTexture(
+                        w, h, data_buffer=uncompressed_bytes, backend=BACKEND
+                    )
                 else:
-                    self.current_frame_idx = len(self.frames) - 1
-                    self.playing = False
+                    raise ValueError(f"Invalid SPRT header in {bin_path}")
 
-            # Update the active display matrix for TransparentSpriteWidget.draw()
-            self.matrix = self.frames[self.current_frame_idx]["matrix"]
+        elif matrix:
+            # Backward compatibility: manually parse legacy list of dicts
+            h = len(matrix)
+            w = len(matrix[0]) if h > 0 else 0
+            self.texture = TerminalTexture(w, h, backend=BACKEND)
 
-    def play(self):
-        self.playing = True
+            for cy, row in enumerate(matrix):
+                for cx, cell in enumerate(row):
+                    if not cell:
+                        continue
 
-    def pause(self):
-        self.playing = False
+                    c_char = cell.get("char")
+                    c_fg = cell.get("fg")
+                    c_bg = cell.get("bg")
 
-    def stop(self):
-        self.playing = False
-        self.current_frame_idx = 0
-        self.elapsed = 0.0
-        if self.frames:
-            self.matrix = self.frames[0]["matrix"]
+                    # 1. Detect fully transparent cell (all nulls)
+                    if c_char is None and c_fg is None and c_bg is None:
+                        # Leave the texture cell at EMPTY_CELL (ch=0, mode=0).
+                        # When blitted, it won't touch the canvas below.
+                        continue
+
+                    # 2. Extract values gracefully
+                    ch = c_char if c_char is not None else " "
+
+                    # 3. Use UNSET instead of None so the renderer treats it as transparent
+                    #    rather than a command to "CLEAR" the background.
+                    fg = tuple(c_fg) if c_fg else UNSET
+                    bg = tuple(c_bg) if c_bg else UNSET
+                    style = (
+                        cell.get("style") if cell.get("style") is not None else UNSET
+                    )
+
+                    self.texture.put_str(cx, cy, ch, fg=fg, bg=bg, style=style)
+
+    def draw(self, canvas: BaseCanvas, config: dict):
+        if not self.texture:
+            return
+
+        self.texture.apply_to(canvas, self.left, self.top)
+
+    @property
+    def w(self):
+        if not self.texture:
+            return 0
+        return self.texture.width
+
+    @property
+    def h(self):
+        if not self.texture:
+            return 0
+        return self.texture.height
+
+
+class AnimatedSpriteWidget(TransparentSpriteWidget):
+    """
+    Renders an animated .bin SPRT file.
+    Uses memory mapping (mmap) and on-the-fly LZ4 uncompression for performance.
+    """
+
+    def __init__(self, name: str, x, y, z_index: int, bin_path: str):
+        super().__init__(name, x, y, z_index)
+
+        self.bin_path = bin_path
+        self.file_obj = open(bin_path, "rb")
+        self.mmap_obj = mmap.mmap(self.file_obj.fileno(), 0, access=mmap.ACCESS_READ)
+
+        header = self.mmap_obj[:16]
+        if not header.startswith(b"SPRT"):
+            raise ValueError(f"Invalid SPRT binary format in {bin_path}")
+
+        _, self.width, self.height, self.total_frames, self.duration = struct.unpack(
+            ">4sHHIf", header
+        )
+
+        self._uncompressed_size = self.width * self.height * 24
+
+        # Pre-calculate frame offsets for O(1) random-access seeking
+        self.frame_offsets = []
+        offset = 16
+        for _ in range(self.total_frames):
+            self.frame_offsets.append(offset)
+            comp_size = struct.unpack(">I", self.mmap_obj[offset : offset + 4])[0]
+            offset += 4 + comp_size
+
+        self.current_frame = -1
+        self.start_time = time.time()
+
+        if self.total_frames > 0:
+            self._live_load_frame(0)
+
+    def _live_load_frame(self, frame_idx: int):
+        """Extracts block from mmap, decompresses LZ4 payload, loads into TerminalTexture."""
+        offset = self.frame_offsets[frame_idx]
+
+        comp_size = struct.unpack(">I", self.mmap_obj[offset : offset + 4])[0]
+        compressed_bytes = self.mmap_obj[offset + 4 : offset + 4 + comp_size]
+
+        uncompressed_bytes = lz4.block.decompress(
+            compressed_bytes, uncompressed_size=self._uncompressed_size
+        )
+
+        self.texture = TerminalTexture(
+            self.width, self.height, data_buffer=uncompressed_bytes, backend=BACKEND
+        )
+        self.current_frame = frame_idx
+
+    def draw(self, canvas: BaseCanvas, config: dict):
+        if self.total_frames > 0 and self.duration > 0:
+            elapsed = time.time() - self.start_time
+            target_frame = int(elapsed / self.duration) % self.total_frames
+
+            if target_frame != self.current_frame:
+                self._live_load_frame(target_frame)
+
+        super().draw(canvas, config)
+
+    def close(self):
+        """Call during cleanup/shutdown to release mapped file descriptor."""
+        if hasattr(self, "mmap_obj"):
+            self.mmap_obj.close()
+            self.file_obj.close()

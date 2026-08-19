@@ -3,7 +3,7 @@ CONFIG = {
         "target_fps": 30,
         "input_timeout": 0.05,
         "math_center_divisor": 2,
-        "plugins": ["passbox", "advanced_greeter", "mmap_sprite"],
+        "plugins": ["passbox", "advanced_greeter", "test_sprite"],
     },
     "theme": {
         "bg_color": (15, 15, 20),

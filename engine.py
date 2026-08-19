@@ -15,7 +15,8 @@ from greetd_ipc import GreetdClient, GreetdError
 from parser import parse_expr
 from registry import UIRegistry
 
-CANVAS = TerminalCanvas(backend="numpy")
+BACKEND = "pure"
+CANVAS = TerminalCanvas(backend=BACKEND)
 UIRegistry.set_canvas(CANVAS)
 
 # ==========================================
