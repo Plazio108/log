@@ -1,14 +1,22 @@
+import collections.abc
+import copy
 import importlib.util
-import json
 import logging
 import time
-from typing import cast
+from typing import Any, cast
 
 from gleaf import BaseCanvas, TerminalCanvas
+from gleaf.backends.base import UNSET
 from gleaf.styles import Modifiers
 from oakey import Empty, KeyListener, Keys
 
+from config import CONFIG
 from greetd_ipc import GreetdClient, GreetdError
+from parser import parse_expr
+from registry import UIRegistry
+
+CANVAS = TerminalCanvas(backend="numpy")
+UIRegistry.set_canvas(CANVAS)
 
 # ==========================================
 # 0. LOGGING SETUP
@@ -25,82 +33,203 @@ logger = logging.getLogger("engine")
 # 1. THE OMNI-CONFIG
 # ==========================================
 
-# with open("config.json") as conf:
-#     CONFIG = json.load(conf)
-
-CONFIG = {
-    "engine": {
-        "target_fps": 30,
-        "input_timeout": 0.05,
-        "math_center_divisor": 2,
-        "plugins": ["advanced_greeter"],
-    },
-    "theme": {
-        "bg_color": (15, 15, 20),
-        "box_bg": (30, 30, 40),
-        "text_main": (220, 220, 220),
-        "text_accent": (255, 100, 100),
-        "text_error": (255, 80, 80),
-        "text_success": (80, 255, 80),
-    },
-    "layout": {
-        "z_background": 0,
-        "z_ui_base": 4,
-        "z_ui_elements": 5,
-        "z_overlay": 10,
-        "box_width": 44,
-        "box_height": 14,
-        "box_x": "center",
-        "box_y": "center",
-        "title_y_offset": 2,
-        "user_y_offset": 6,
-        "pass_y_offset": 8,
-        "msg_y_offset": 11,
-        "x_padding": 4,
-    },
-    "text": {
-        "title": " standalone-dm ",
-        "user_active": "> user: ",
-        "user_idle": "  user: ",
-        "pass_active": "> pass: ",
-        "pass_idle": "  pass: ",
-        "mask_char": "*",
-        "msg_authenticating": "Authenticating...",
-        "msg_success": "Login successful. Starting...",
-        "msg_fail": "Authentication failed.",
-    },
-    "system": {"default_session_cmd": ["Hyprland"], "empty_string": ""},
-}
+# CONFIG
 
 
 # ==========================================
 # 2. WIDGET BASE CLASS
 # ==========================================
+
+
 class BaseWidget:
-    def __init__(self, name: str, x: int | str, y: int | str, z_index: int):
+    CONFIG = CONFIG
+    UIRegistry = UIRegistry
+
+    def __init__(
+        self,
+        name: str | None,
+        x: int | str,
+        y: int | str,
+        z_index: int | str,
+        width: int | str | None = None,
+        height: int | str | None = None,
+        anchor: str | None = None,
+        config: dict | None = None,
+    ):
         self.name = name
+        self.config = config or {}
         self.x_raw = x
         self.y_raw = y
         self.z_index = z_index
+        self.w_raw = width
+        self.h_raw = height
+        self.anchor = anchor
         self.focusable = False
         self.focused = False
         self.visible = True
         self.value = ""
 
+        if name:
+            self.UIRegistry.register(name, self)
+
+    @property
+    def w(self):
+        return (
+            int(self.parse(self.w_raw, CANVAS.width, self.config or self.CONFIG))
+            if self.w_raw
+            else 0
+        )
+
+    @property
+    def h(self):
+        return (
+            int(self.parse(self.h_raw, CANVAS.height, self.config or self.CONFIG))
+            if self.h_raw
+            else 0
+        )
+
+    @property
+    def anchorx(self):
+        return int(self.parse(self.x_raw, CANVAS.width, self.config or self.CONFIG))
+
+    @property
+    def anchory(self):
+        return int(self.parse(self.y_raw, CANVAS.height, self.config or self.CONFIG))
+
+    @property
+    def top(self):
+        anchor = self.anchor or self.CONFIG["anchors"].get(self.name, "nw")
+
+        match anchor:
+            case "nw" | "n" | "ne":
+                return self.anchory
+            case "w" | "center" | "e":
+                return self.anchory - self.h // 2
+            case "sw" | "s" | "se":
+                return self.anchory - self.h + 1
+            case _:
+                raise ValueError(
+                    f"Invalid Anchor for {type(self).__name__}: {self.name or 'not named'}"
+                )
+
+    @property
+    def bottom(self):
+        anchor = self.anchor or self.CONFIG["anchors"].get(self.name, "nw")
+
+        match anchor:
+            case "nw" | "n" | "ne":
+                return self.anchory + self.h - 1
+            case "w" | "center" | "e":
+                return self.anchory + self.h // 2 - 1 + self.h % 2
+            case "sw" | "s" | "se":
+                return self.anchory
+            case _:
+                raise ValueError(
+                    f"Invalid Anchor for {type(self).__name__}: {self.name or 'not named'}"
+                )
+
+    @property
+    def left(self):
+        anchor = self.anchor or self.CONFIG["anchors"].get(self.name, "nw")
+
+        match anchor:
+            case "nw" | "w" | "sw":
+                return self.anchorx
+            case "n" | "center" | "s":
+                return self.anchorx - self.w // 2
+            case "ne" | "e" | "se":
+                return self.anchorx - self.w + 1
+            case _:
+                raise ValueError(
+                    f"Invalid Anchor for {type(self).__name__}: {self.name or 'not named'}"
+                )
+
+    @property
+    def right(self):
+        anchor = self.anchor or self.CONFIG["anchors"].get(self.name, "nw")
+
+        match anchor:
+            case "nw" | "w" | "sw":
+                return self.anchorx + self.w - 1
+            case "n" | "center" | "s":
+                return self.anchorx + self.w // 2 - 1 + self.w % 2
+            case "ne" | "e" | "se":
+                return self.anchorx
+            case _:
+                raise ValueError(
+                    f"Invalid Anchor for {type(self).__name__}: {self.name or 'not named'}"
+                )
+
+    @property
+    def centerx(self):
+        return self.left + self.w // 2
+
+    @property
+    def centery(self):
+        return self.top + self.h // 2
+
+    def _get_context_refs(self) -> dict:
+        """Collects current state refs available for expression evaluation."""
+        return {
+            "self": self,
+            "canvas_w": UIRegistry.canvas.width,
+            "canvas_h": UIRegistry.canvas.height,
+            **UIRegistry.widgets,
+        }
+
+    def parse(self, expr: Any, length: float | None = None, config=None) -> Any:
+        """
+        General-purpose child parse method.
+        Can return any type (numbers, strings, colors, objects).
+        """
+        return parse_expr(
+            expr,
+            length=length,
+            config=config or (self.config or self.CONFIG),
+            refs=self._get_context_refs(),
+        )
+
+    def get_coord(self, expr: Any, length: int | None = None, config=None) -> int:
+        """
+        Strict layout method. Evaluates an expression and strictly enforces
+        an integer output for sizing and positioning coordinates.
+        """
+        res = self.parse(expr, length=length, config=config)
+
+        if isinstance(res, (int, float)):
+            return int(res)
+
+        raise TypeError(
+            f"Strict coordinate parsing failed for expression '{expr}': "
+            f"Expected numeric result, but got {type(res).__name__} ({res!r})"
+        )
+
     def get_coords(
-        self, canvas: BaseCanvas, w: int, h: int, config: dict
+        self,
+        canvas: BaseCanvas,
+        width: int | None = None,
+        height: int | None = None,
+        config=None,
     ) -> tuple[int, int]:
-        div = config["engine"]["math_center_divisor"]
-        x = (
-            (canvas.width // div) - (w // div)
-            if self.x_raw == "center"
-            else int(self.x_raw)
-        )
-        y = (
-            (canvas.height // div) - (h // div)
-            if self.y_raw == "center"
-            else int(self.y_raw)
-        )
+        # div = (
+        #     config["engine"]["math_center_divisor"]
+        #     if config
+        #     else self.config["engine"]["math_center_divisor"]
+        # )
+
+        x = self.get_coord(self.x_raw, canvas.width, config)
+        y = self.get_coord(self.y_raw, canvas.height, config)
+
+        # x_res = (
+        #     (canvas.width // div) - ((width or 0) // div)
+        #     if self.x_raw == "center"
+        #     else x
+        # )
+        # y_res = (
+        #     (canvas.height // div) - ((height or 0) // div)
+        #     if self.y_raw == "center"
+        #     else y
+        # )
         return x, y
 
     def update(self, dt: float, engine: "GreeterEngine"):
@@ -112,18 +241,26 @@ class BaseWidget:
     def handle_key(self, key: str, engine: "GreeterEngine") -> bool:
         return False
 
+    def on_focus(self, engine):
+        pass
+
+    def on_focus_loss(self, engine):
+        pass
+
 
 # ==========================================
 # 3. MODULAR DEFAULT WIDGETS
 # ==========================================
 class DefaultBackground(BaseWidget):
     def __init__(self, config: dict):
-        super().__init__("default_bg", 0, 0, config["layout"]["z_background"])
+        super().__init__(
+            "default_bg", 0, 0, config["layout"]["z_background"], "full", "full"
+        )
 
     def draw(self, canvas, config):
         canvas.edit_region_colors(
-            self.x_raw,
-            self.y_raw,
+            0,
+            0,
             canvas.width,
             canvas.height,
             None,
@@ -131,34 +268,54 @@ class DefaultBackground(BaseWidget):
         )
 
 
+class LabelWidget(BaseWidget):
+    """Draws a Label"""
+
+    def __init__(
+        self,
+        name: str | None,
+        x: int | str,
+        y: int | str,
+        z: int,
+        text: str,
+        fg=UNSET,
+        bg=UNSET,
+        style=UNSET,
+        config: dict | None = None,
+    ):
+        super().__init__(name, x, y, z, None, 1, config=config)
+        self.text = text
+        self.fg = fg
+        self.bg = bg
+        self.style = style
+
+    @property
+    def w(self):
+        return len(self.text)
+
+    def draw(self, canvas: BaseCanvas, config: dict):
+        # c_x, c_y = self.get_coords(canvas, None, None, config)
+
+        canvas.put_str(self.left, self.top, self.text, self.fg, self.bg, self.style)
+
+
 class BoxBackgroundWidget(BaseWidget):
     """Draws the static box and title."""
 
-    def __init__(self, config: dict):
-        super().__init__(
-            "box_bg",
-            config["layout"]["box_x"],
-            config["layout"]["box_y"],
-            config["layout"]["z_ui_base"],
-        )
+    def __init__(self, name, x, y, z, w, h, config: dict):
+        super().__init__(name, x, y, z, w, h)
 
     def draw(self, canvas, config):
-        lyt, txt, thm = config["layout"], config["text"], config["theme"]
-        c_x, c_y = self.get_coords(canvas, lyt["box_width"], lyt["box_height"], config)
-        div = config["engine"]["math_center_divisor"]
+        thm = config["theme"]
+        # c_x, c_y = self.get_coords(canvas, lyt["box_width"], lyt["box_height"], config)
 
         canvas.edit_region_colors(
-            c_x, c_y, lyt["box_width"], lyt["box_height"], None, thm["box_bg"]
-        )
-        title_x = c_x + (lyt["box_width"] // div) - (len(txt["title"]) // div)
-        canvas.put_str(
-            title_x,
-            c_y + lyt["title_y_offset"],
-            txt["title"],
-            thm["text_main"],
-            thm["box_bg"],
-            Modifiers.BOLD,
+            self.left,
+            self.top,
+            self.w,
+            self.h,
             None,
+            thm["box_bg"],
         )
 
 
@@ -168,21 +325,16 @@ class InputWidget(BaseWidget):
     def __init__(
         self,
         name: str,
-        y_offset_key: str,
+        x,
+        y,
         label_active_key: str,
         label_idle_key: str,
         is_password: bool,
         config: dict,
     ):
-        super().__init__(
-            name,
-            config["layout"]["box_x"],
-            config["layout"]["box_y"],
-            config["layout"]["z_ui_elements"],
-        )
+        super().__init__(name, x, y, config["layout"]["z_ui_elements"])
         self.focusable = True
         self.is_password = is_password
-        self.y_offset_key = y_offset_key
         self.label_active_key = label_active_key
         self.label_idle_key = label_idle_key
 
@@ -193,7 +345,7 @@ class InputWidget(BaseWidget):
         elif len(key) == 1 and key.isprintable():
             self.value += key
             # Clear auth messages on new typing
-            auth_logic = engine.get_widget("auth_logic")
+            auth_logic = cast(AuthLogicWidget, engine.get_widget("auth_logic"))
             if auth_logic:
                 auth_logic.sys_msg = engine.config["system"]["empty_string"]
             return True
@@ -201,7 +353,7 @@ class InputWidget(BaseWidget):
 
     def draw(self, canvas, config):
         lyt, txt, thm = config["layout"], config["text"], config["theme"]
-        c_x, c_y = self.get_coords(canvas, lyt["box_width"], lyt["box_height"], config)
+        # c_x, c_y = self.get_coords(canvas, lyt["box_width"], lyt["box_height"], config)
 
         lbl = txt[self.label_active_key] if self.focused else txt[self.label_idle_key]
         col = thm["text_accent"] if self.focused else thm["text_main"]
@@ -210,8 +362,8 @@ class InputWidget(BaseWidget):
         )
 
         canvas.put_str(
-            c_x + lyt["x_padding"],
-            c_y + lyt[self.y_offset_key],
+            self.left,
+            self.top,
             f"{lbl}{disp_val}",
             col,
             thm["box_bg"],
@@ -226,8 +378,8 @@ class AuthLogicWidget(BaseWidget):
     def __init__(self, config: dict):
         super().__init__(
             "auth_logic",
-            config["layout"]["box_x"],
-            config["layout"]["box_y"],
+            config["layout"]["msg_x"],
+            config["layout"]["msg_y"],
             config["layout"]["z_ui_elements"],
         )
         self.sys_msg = config["system"]["empty_string"]
@@ -238,13 +390,11 @@ class AuthLogicWidget(BaseWidget):
             return
         lyt, thm = config["layout"], config["theme"]
         c_x, c_y = self.get_coords(canvas, lyt["box_width"], lyt["box_height"], config)
-        div = config["engine"]["math_center_divisor"]
 
         m_col = thm["text_error"] if self.msg_is_error else thm["text_success"]
-        msg_x = c_x + (lyt["box_width"] // div) - (len(self.sys_msg) // div)
         canvas.put_str(
-            msg_x,
-            c_y + lyt["msg_y_offset"],
+            self.left,
+            self.top,
             self.sys_msg,
             m_col,
             thm["box_bg"],
@@ -301,20 +451,52 @@ class AuthLogicWidget(BaseWidget):
 # ==========================================
 # 4. THE CORE ENGINE
 # ==========================================
+
+
+def deep_update(d, u):
+    """Recursively deep updates dictionary d with dictionary u."""
+    for k, v in u.items():
+        if isinstance(v, collections.abc.Mapping):
+            d[k] = deep_update(d.get(k, {}), v)
+        else:
+            d[k] = v
+    return d
+
+
 class GreeterEngine:
     def __init__(self, config: dict):
+        self.original_config = copy.deepcopy(config)
         self.config = config
-        self.canvas = TerminalCanvas(width=None, height=None, backend="pure")
+        self.loaded_plugins = []
+
+        self._load_plugin_modules()
+
+        self.canvas = CANVAS
         self.greetd = GreetdClient()
         self.widgets: list[BaseWidget] = []
         self.running = True
 
+        self._build_default_widgets()
+
+    def _build_default_widgets(self):
+
         self.add_widget(DefaultBackground(self.config))
-        self.add_widget(BoxBackgroundWidget(self.config))
+        self.add_widget(
+            BoxBackgroundWidget(
+                "box_bg",
+                self.config["layout"]["box_x"],
+                self.config["layout"]["box_y"],
+                self.config["layout"]["z_ui_base"],
+                self.config["layout"]["box_width"],
+                self.config["layout"]["box_height"],
+                config=self.config,
+            )
+        )
         self.add_widget(
             InputWidget(
                 "input_user",
-                "user_y_offset",
+                self.config["layout"]["user_x"],
+                self.config["layout"]["user_y"],
                 "user_active",
                 "user_idle",
                 False,
@@ -324,7 +506,8 @@ class GreeterEngine:
         self.add_widget(
             InputWidget(
                 "input_pass",
-                "pass_y_offset",
+                self.config["layout"]["pass_x"],
+                self.config["layout"]["pass_y"],
                 "pass_active",
                 "pass_idle",
                 True,
@@ -332,6 +515,19 @@ class GreeterEngine:
             )
         )
         self.add_widget(AuthLogicWidget(self.config))
+
+        self.add_widget(
+            LabelWidget(
+                "title",
+                self.config["layout"]["title_x"],
+                self.config["layout"]["title_y"],
+                self.config["layout"]["z_ui_elements"],
+                self.config["text"]["title"],
+                self.config["theme"]["text_main"],
+                style=Modifiers.BOLD,
+                config=self.config,
+            )
+        )
 
         # Initialize default focus
         focusables = [w for w in self.widgets if w.focusable]
@@ -365,6 +561,7 @@ class GreeterEngine:
         current_idx = next((i for i, w in enumerate(focusables) if w.focused), -1)
         if current_idx != -1:
             focusables[current_idx].focused = False
+            focusables[current_idx].on_focus_loss(self)
 
         next_idx = (
             (current_idx - 1) % len(focusables)
@@ -372,28 +569,146 @@ class GreeterEngine:
             else (current_idx + 1) % len(focusables)
         )
         focusables[next_idx].focused = True
+        focusables[next_idx].on_focus(self)
 
-    def _load_plugins(self):
-        for plugin_name in self.config["engine"]["plugins"]:
-            try:
-                logger.info(f"Loading plugin: {plugin_name}")
-                spec = importlib.util.spec_from_file_location(
-                    plugin_name, f"plugins/{plugin_name}.py"
+    def _load_plugin_modules(self):
+        """Imports modules, runs config(), and handles dynamic plugin list changes."""
+        max_passes = 3
+        current_pass = 0
+
+        # Keep a cumulative list of overrides harvested across all passes
+        # so they can re-assert themselves if we have to wipe the config.
+        all_discovered_overrides = []
+
+        while current_pass < max_passes:
+            current_pass += 1
+            expected_plugins = list(self.config["engine"]["plugins"])
+            self.loaded_plugins.clear()
+
+            for plugin_name in expected_plugins:
+                try:
+                    logger.info(
+                        f"Importing plugin module: {plugin_name} (Pass {current_pass})"
+                    )
+                    spec = importlib.util.spec_from_file_location(
+                        plugin_name, f"plugins/{plugin_name}.py"
+                    )
+                    if spec and spec.loader:
+                        plugin_module = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(plugin_module)
+
+                        if hasattr(plugin_module, "config"):
+                            logger.debug(f"Triggering config() hook for {plugin_name}")
+                            plugin_module.config(self.config)
+
+                        self.loaded_plugins.append((plugin_name, plugin_module))
+                except Exception as e:
+                    logger.error(
+                        f"Failed to load plugin [{plugin_name}]: {e}", exc_info=True
+                    )
+
+            # Harvest any new overrides injected by plugins during this pass
+            if "__overrides" in self.config:
+                all_discovered_overrides.extend(self.config.pop("__overrides"))
+
+            # Sequentially deep-merge ALL accumulated overrides
+            for override_dict in all_discovered_overrides:
+                if isinstance(override_dict, dict):
+                    deep_update(self.config, override_dict)
+
+            # --- THE LOOP BREAK ---
+            # Check if the user config altered the plugin list!
+            new_plugins = self.config["engine"]["plugins"]
+            if new_plugins != expected_plugins:
+                logger.info(
+                    f"Plugin list altered by config: {expected_plugins} -> {new_plugins}"
                 )
-                if spec and spec.loader:
-                    plugin_module = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(plugin_module)
+
+                # 1. Wipe the working config to remove "ghost state" from discarded plugins
+                self.config = copy.deepcopy(self.original_config)
+
+                # 2. Force the pristine config to use the newly requested plugin list
+                self.config["engine"]["plugins"] = new_plugins
+
+                # Loop again to load the new plugins!
+                # (The user overrides are safe in all_discovered_overrides and will be reapplied)
+                continue
+
+            # If we reach here, the plugin list has stabilized
+            break
+
+        if current_pass >= max_passes:
+            logger.warning("Max plugin reload passes reached! Infinite loop prevented.")
+
+    def _setup_plugins(self):
+        """Runs the setup() hooks for already imported modules."""
+        for plugin_name, plugin_module in self.loaded_plugins:
+            try:
+                # PHASE 2 Hook
+                if hasattr(plugin_module, "setup"):
+                    logger.info(f"Triggering setup() hook for {plugin_name}")
                     plugin_module.setup(self)
-                    logger.info(f"Plugin {plugin_name} loaded successfully.")
             except Exception as e:
-                logger.error(f"Plugin error [{plugin_name}]: {e}", exc_info=True)
+                logger.error(f"Plugin setup error [{plugin_name}]: {e}", exc_info=True)
+
+    def reload_plugins(self, new_plugins_list: list[str] | None = None):
+        """Completely resets engine state and hot-reloads the UI."""
+        logger.info("--- HOT RELOADING PLUGINS ---")
+
+        if new_plugins_list is not None:
+            self.original_config["engine"]["plugins"] = new_plugins_list
+
+        # Revert to pristine snapshot (this preserves __active_user_idx)
+        self.config = copy.deepcopy(self.original_config)
+        self.loaded_plugins.clear()
+
+        # Re-run full UI lifecycle
+        self._load_plugin_modules()
+        self._build_default_widgets()
+        self._setup_plugins()
+
+        # Redraw screen instantly
+        self.force_draw()
+        logger.info("--- HOT RELOAD COMPLETE ---")
+
+    def _process_keys(self, listener: KeyListener, config):
+        while not listener.empty():
+            try:
+                key = listener.get(
+                    block=False, timeout=config["engine"]["input_timeout"]
+                )
+            except Empty:
+                key = None
+
+            if key:
+                if key == Keys.F5:
+                    self.reload_plugins()
+                    break
+
+                elif key == Keys.ESCAPE:
+                    logger.info("ESCAPE pressed, shutting down.")
+                    self.running = False
+                    break
+
+                elif key == Keys.TAB:
+                    self._cycle_focus(reverse=False)
+                elif key == Keys.SHIFT_TAB:
+                    self._cycle_focus(reverse=True)
+                elif key == Keys.ENTER:
+                    auth = cast(AuthLogicWidget, self.get_widget("auth_logic"))
+                    if auth:
+                        auth.attempt_login(self)
+                else:
+                    for w in reversed(self.widgets):
+                        if w.focusable and w.focused and w.handle_key(key, self):
+                            break
 
     def run(self):
         logger.info("--- Starting GreeterEngine ---")
 
         # 1. FIX GHOST FRAME: Enter alternate screen BEFORE plugins run setup routines!
         self.canvas.enter_alternate_screen()
-        self._load_plugins()
+        self._setup_plugins()
 
         try:
             self.greetd.connect()
@@ -414,37 +729,7 @@ class GreeterEngine:
                     if dt >= frame_time:
                         last_time = current_time
 
-                        try:
-                            key = listener.get(
-                                block=False, timeout=cfg_eng["input_timeout"]
-                            )
-                        except Empty:
-                            key = None
-
-                        if key:
-                            if key == Keys.ESCAPE:
-                                logger.info("ESCAPE pressed, shutting down.")
-                                self.running = False
-                                break
-
-                            elif key == Keys.TAB:
-                                self._cycle_focus(reverse=False)
-                            elif key == Keys.SHIFT_TAB:
-                                self._cycle_focus(reverse=True)
-                            elif key == Keys.ENTER:
-                                auth = cast(
-                                    AuthLogicWidget, self.get_widget("auth_logic")
-                                )
-                                if auth:
-                                    auth.attempt_login(self)
-                            else:
-                                for w in reversed(self.widgets):
-                                    if (
-                                        w.focusable
-                                        and w.focused
-                                        and w.handle_key(key, self)
-                                    ):
-                                        break
+                        self._process_keys(listener, self.config)
 
                         for w in self.widgets:
                             if w.visible:
