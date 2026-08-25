@@ -50,5 +50,13 @@ CONFIG = {
         "msg_success": "Login successful. Starting...",
         "msg_fail": "Authentication failed.",
     },
-    "system": {"default_session_cmd": ["start-hyprland"], "empty_string": ""},
+    "system": {
+        "default_session_cmd": [
+            "bash",
+            "-l",
+            "-c",
+            "dbus-run-session Hyprland > /tmp/hyprland.log 2>&1",
+        ],
+        "empty_string": "",
+    },
 }

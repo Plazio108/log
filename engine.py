@@ -458,7 +458,9 @@ class AuthLogicWidget(BaseWidget):
                 )
                 self.sys_msg = txt["msg_success"]
                 engine.force_draw()
-                engine.greetd.start_session(cmd=sys_cfg["default_session_cmd"])
+                engine.greetd.start_session(
+                    cmd=sys_cfg["default_session_cmd"], env=sys_cfg.get("env")
+                )
                 engine.running = False
             else:
                 logger.warning(f"Authentication failed for {w_user.value}")
