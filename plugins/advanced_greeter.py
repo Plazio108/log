@@ -63,30 +63,30 @@ class UserProfileCycler(BaseWidget):
             return True
         return False
 
-    def _apply_user_profile(self, engine):
-        self.value = self.users[self.current_idx]
-        cfg_path = f"/etc/greeter/users/{self.value}.json"
+    # def _apply_user_profile(self, engine):
+    #     self.value = self.users[self.current_idx]
+    #     cfg_path = f"/etc/greeter/users/{self.value}.json"
 
-        logger.debug(f"Cycling to user profile: {self.value}")
+    #     logger.debug(f"Cycling to user profile: {self.value}")
 
-        if os.path.exists(cfg_path):
-            try:
-                with open(cfg_path, "r") as f:
-                    engine.config["theme"].update(json.load(f))
-                    logger.debug(f"Loaded custom theme for user: {self.value}")
-            except Exception as e:
-                logger.error(f"Failed to load theme for {self.value}: {e}")
-        else:
-            engine.config["theme"]["text_accent"] = (100, 200, 255)  # Fallback
-            logger.debug(f"No custom theme found for {self.value}, using fallback.")
+    #     if os.path.exists(cfg_path):
+    #         try:
+    #             with open(cfg_path, "r") as f:
+    #                 engine.config["theme"].update(json.load(f))
+    #                 logger.debug(f"Loaded custom theme for user: {self.value}")
+    #         except Exception as e:
+    #             logger.error(f"Failed to load theme for {self.value}: {e}")
+    #     else:
+    #         engine.config["theme"]["text_accent"] = (100, 200, 255)  # Fallback
+    #         logger.debug(f"No custom theme found for {self.value}, using fallback.")
 
-        icon_widget = engine.get_widget("profile_icon")
-        if icon_widget:
-            icon_widget.load_avatar(self.value)
+    #     icon_widget = engine.get_widget("profile_icon")
+    #     if icon_widget:
+    #         icon_widget.load_avatar(self.value)
 
-        # This force_draw is now safe because the engine enters the
-        # alternate screen BEFORE loading plugins.
-        engine.force_draw()
+    #     # This force_draw is now safe because the engine enters the
+    #     # alternate screen BEFORE loading plugins.
+    #     engine.force_draw()
 
     def draw(self, canvas, config):
         thm = config["theme"]
@@ -132,7 +132,7 @@ class ProfileIconWidget(TransparentSpriteWidget):
         self.load_avatar(username)
 
     def load_avatar(self, username: str):
-        path = f"/etc/greeter/icons/{username}.json"
+        path = f"/usr/share/log/icons/{username}.json"
         if os.path.exists(path):
             try:
                 with open(path, "r") as f:
@@ -209,7 +209,7 @@ def config(config):
         config["__overrides"] = []
 
     # 4. Load the user's Python config file dynamically
-    cfg_path = f"/etc/greeter/users/{active_user}_config.py"
+    cfg_path = f"/usr/share/log/users/{active_user}_config.py"
 
     if os.path.exists(cfg_path):
         try:

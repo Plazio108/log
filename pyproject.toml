@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "gleaf",
+    "just-playback>=0.1.8",
     "lz4>=4.4.5",
     "numpy>=2.5.2",
     "oakey",

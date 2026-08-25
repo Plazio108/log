@@ -5,19 +5,21 @@ import logging
 import time
 from typing import Any, cast
 
-from gleaf import BaseCanvas, TerminalCanvas
+from gleaf import BaseCanvas
 from gleaf.backends.base import UNSET
 from gleaf.styles import Modifiers
 from oakey import Empty, KeyListener, Keys
 
+from audio_manager import AudioManager
+from canvas import BACKEND, CANVAS  # noqa: F401
 from config import CONFIG
 from greetd_ipc import GreetdClient, GreetdError
 from parser import parse_expr
 from registry import UIRegistry
 
-BACKEND = "pure"
-CANVAS = TerminalCanvas(backend=BACKEND)
 UIRegistry.set_canvas(CANVAS)
+
+AUDIO_MANAGER = AudioManager()
 
 # ==========================================
 # 0. LOGGING SETUP
@@ -27,6 +29,7 @@ logging.basicConfig(
     filemode="a",
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     level=logging.DEBUG,
+    force=True,
 )
 logger = logging.getLogger("engine")
 
@@ -76,7 +79,11 @@ class BaseWidget:
     @property
     def w(self):
         return (
-            int(self.parse(self.w_raw, CANVAS.width, self.config or self.CONFIG))
+            int(
+                self.parse(
+                    self.w_raw, self.UIRegistry.canvas.width, self.config or self.CONFIG
+                )
+            )
             if self.w_raw
             else 0
         )
@@ -84,18 +91,32 @@ class BaseWidget:
     @property
     def h(self):
         return (
-            int(self.parse(self.h_raw, CANVAS.height, self.config or self.CONFIG))
+            int(
+                self.parse(
+                    self.h_raw,
+                    self.UIRegistry.canvas.height,
+                    self.config or self.CONFIG,
+                )
+            )
             if self.h_raw
             else 0
         )
 
     @property
     def anchorx(self):
-        return int(self.parse(self.x_raw, CANVAS.width, self.config or self.CONFIG))
+        return int(
+            self.parse(
+                self.x_raw, self.UIRegistry.canvas.width, self.config or self.CONFIG
+            )
+        )
 
     @property
     def anchory(self):
-        return int(self.parse(self.y_raw, CANVAS.height, self.config or self.CONFIG))
+        return int(
+            self.parse(
+                self.y_raw, self.UIRegistry.canvas.height, self.config or self.CONFIG
+            )
+        )
 
     @property
     def top(self):
@@ -319,6 +340,10 @@ class BoxBackgroundWidget(BaseWidget):
             thm["box_bg"],
         )
 
+        canvas.put_block(
+            self.left, self.top, (" " * self.w + "\n") * self.h, self.w, self.h
+        )
+
 
 class InputWidget(BaseWidget):
     """A highly reusable text input field."""
@@ -473,9 +498,12 @@ class GreeterEngine:
         self._load_plugin_modules()
 
         self.canvas = CANVAS
+        self.audio_manager = AUDIO_MANAGER
         self.greetd = GreetdClient()
         self.widgets: list[BaseWidget] = []
         self.running = True
+
+        self.keylistener = None
 
         self._build_default_widgets()
 
@@ -546,7 +574,6 @@ class GreeterEngine:
         return next((w for w in self.widgets if w.name == name), None)
 
     def force_draw(self):
-        self.canvas.auto_resize()
         self.canvas.clear()
         for w in self.widgets:
             if w.visible:
@@ -592,7 +619,7 @@ class GreeterEngine:
                         f"Importing plugin module: {plugin_name} (Pass {current_pass})"
                     )
                     spec = importlib.util.spec_from_file_location(
-                        plugin_name, f"plugins/{plugin_name}.py"
+                        plugin_name, f"/usr/share/log/plugins/{plugin_name}.py"
                     )
                     if spec and spec.loader:
                         plugin_module = importlib.util.module_from_spec(spec)
@@ -682,7 +709,7 @@ class GreeterEngine:
                 key = None
 
             if key:
-                if key == Keys.F5:
+                if key == Keys.CTRL_R:
                     self.reload_plugins()
                     break
 
@@ -701,8 +728,11 @@ class GreeterEngine:
                         auth.attempt_login(self)
                 else:
                     for w in reversed(self.widgets):
-                        if w.focusable and w.focused and w.handle_key(key, self):
+                        if w.focused and w.handle_key(key, self):
                             break
+
+    def auto_resize(self):
+        self.canvas.auto_resize()
 
     def run(self):
         logger.info("--- Starting GreeterEngine ---")
@@ -723,6 +753,7 @@ class GreeterEngine:
 
         try:
             with KeyListener(suppress_errors=True) as listener:
+                self.keylistener = listener
                 while self.running:
                     current_time = time.time()
                     dt = current_time - last_time
@@ -737,6 +768,7 @@ class GreeterEngine:
                                 w.update(dt, self)
 
                         if self.running:
+                            self.auto_resize()
                             self.force_draw()
                     else:
                         time.sleep(frame_time - dt)
