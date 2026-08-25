@@ -50,5 +50,5 @@ CONFIG = {
         "msg_success": "Login successful. Starting...",
         "msg_fail": "Authentication failed.",
     },
-    "system": {"default_session_cmd": ["Hyprland"], "empty_string": ""},
+    "system": {"default_session_cmd": ["start-hyprland"], "empty_string": ""},
 }

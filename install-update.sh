@@ -45,12 +45,12 @@ for item in "$CURRENT_DIR"/*; do
 done
 
 # Copy default assets/plugins to /usr/share/log without overwriting existing user files
-if [ -d "$CURRENT_DIR/assets" ]; then
-    cp -rn "$CURRENT_DIR/assets/"* "$SHARE_DIR/assets/" 2>/dev/null || true
-fi
-if [ -d "$CURRENT_DIR/plugins" ]; then
-    cp -rn "$CURRENT_DIR/plugins/"* "$SHARE_DIR/plugins/" 2>/dev/null || true
-fi
+# if [ -d "$CURRENT_DIR/assets" ]; then
+#     cp -rn "$CURRENT_DIR/assets/"* "$SHARE_DIR/assets/" 2>/dev/null || true
+# fi
+# if [ -d "$CURRENT_DIR/plugins" ]; then
+#     cp -rn "$CURRENT_DIR/plugins/"* "$SHARE_DIR/plugins/" 2>/dev/null || true
+# fi
 
 # 4. Ensure 'uv' is installed
 if ! command -v uv &> /dev/null; then
