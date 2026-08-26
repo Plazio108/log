@@ -450,29 +450,43 @@ class AuthLogicWidget(BaseWidget):
         txt = engine.config["text"]
         sys_cfg = engine.config["system"]
 
+        username = w_user.value
+        password = w_pass.value
+
         self.sys_msg = txt["msg_authenticating"]
         self.msg_is_error = False
 
         engine.force_draw()
 
-        username = w_user.value
-        password = w_pass.value
-
         logger.info(f"Attempting login for user: {username}")
 
         try:
             # ----------------------------------------------------------
-            # Start authentication
+            # IMPORTANT:
+            #
+            # Cancel the previous session BEFORE create_session().
+            #
+            # This is what nwg-hello does. It is necessary because after
+            # auth_error the previous session remains configured from
+            # the greeter's point of view.
+            #
+            # On the first login there may be nothing to cancel, so
+            # failure is intentionally ignored.
+            # ----------------------------------------------------------
+
+            try:
+                engine.greetd.cancel_session()
+            except Exception as e:
+                logger.debug(f"No previous greetd session to cancel: {e}")
+
+            # ----------------------------------------------------------
+            # Start a fresh authentication session.
             # ----------------------------------------------------------
 
             resp = engine.greetd.create_session(username)
 
             # ----------------------------------------------------------
-            # Process PAM authentication messages.
-            #
-            # greetd does not guarantee that there is only one
-            # auth_message, nor does it guarantee that the first one
-            # will be a password prompt.
+            # PAM authentication conversation.
             # ----------------------------------------------------------
 
             while resp.get("type") == "auth_message":
@@ -489,23 +503,18 @@ class AuthLogicWidget(BaseWidget):
                 logger.debug(f"greetd auth message: type={msg_type!r}, message={msg!r}")
 
                 if msg_type == "secret":
-                    # Password / other hidden credential.
                     response = password
 
                 elif msg_type == "visible":
-                    # Visible input such as a username, OTP, etc.
-                    #
-                    # This preserves your current behavior for the
-                    # simple username/password PAM setup.
                     response = username
 
                 elif msg_type in ("info", "error"):
-                    # Informational/error PAM messages don't require
-                    # an actual response.
                     response = None
 
                 else:
-                    logger.error(f"Unknown greetd auth message type: {msg_type!r}")
+                    logger.error(
+                        f"Unknown greetd authentication message type: {msg_type!r}"
+                    )
 
                     self._fail(
                         txt["msg_fail"],
@@ -517,39 +526,34 @@ class AuthLogicWidget(BaseWidget):
 
                 resp = engine.greetd.post_auth_message_response(response)
 
-                # ------------------------------------------------------
-                # Authentication failure.
+            # ----------------------------------------------------------
+            # WRONG PASSWORD
+            # ----------------------------------------------------------
+
+            if resp.get("type") == "error" and resp.get("error_type") == "auth_error":
+                description = resp.get(
+                    "description",
+                    txt["msg_fail"],
+                )
+
+                logger.warning(f"Authentication failed for {username}: {description}")
+
+                # IMPORTANT:
                 #
-                # This is NOT an exception anymore.
+                # Do NOT call cancel_session() here.
                 #
-                # greetd automatically cancels the session when an
-                # authentication error occurs, so DO NOT call
-                # cancel_session() here.
-                # ------------------------------------------------------
+                # The next attempt will perform the cancellation
+                # BEFORE create_session(), exactly like nwg-hello.
+                self._fail(
+                    txt["msg_fail"],
+                    w_pass,
+                    engine,
+                )
 
-                if (
-                    resp.get("type") == "error"
-                    and resp.get("error_type") == "auth_error"
-                ):
-                    description = resp.get(
-                        "description",
-                        txt["msg_fail"],
-                    )
-
-                    logger.warning(
-                        f"Authentication failed for {username}: {description}"
-                    )
-
-                    self._fail(
-                        txt["msg_fail"],
-                        w_pass,
-                        engine,
-                    )
-
-                    return
+                return
 
             # ----------------------------------------------------------
-            # Authentication completed.
+            # SUCCESS
             # ----------------------------------------------------------
 
             if resp.get("type") == "success":
@@ -567,8 +571,6 @@ class AuthLogicWidget(BaseWidget):
                     env=sys_cfg.get("env"),
                 )
 
-                # greetd starts the user session after the greeter
-                # terminates.
                 engine.running = False
 
                 return
@@ -577,9 +579,7 @@ class AuthLogicWidget(BaseWidget):
             # Unexpected response.
             # ----------------------------------------------------------
 
-            logger.error(
-                f"Unexpected response from greetd during authentication: {resp!r}"
-            )
+            logger.error(f"Unexpected response from greetd: {resp!r}")
 
             self._fail(
                 txt["msg_fail"],
@@ -588,13 +588,6 @@ class AuthLogicWidget(BaseWidget):
             )
 
         except GreetdError as e:
-            # ----------------------------------------------------------
-            # A GreetdError here means a REAL greetd/IPC error.
-            #
-            # auth_error is intentionally not raised by GreetdClient,
-            # because it is part of the normal authentication flow.
-            # ----------------------------------------------------------
-
             logger.error(f"Greetd exception during login: {e.description}")
 
             self._fail(
@@ -604,10 +597,6 @@ class AuthLogicWidget(BaseWidget):
             )
 
         except (ConnectionError, OSError) as e:
-            # ----------------------------------------------------------
-            # Actual socket failure.
-            # ----------------------------------------------------------
-
             logger.error(f"Greetd IPC connection error during login: {e}")
 
             self._fail(
@@ -623,16 +612,12 @@ class AuthLogicWidget(BaseWidget):
         engine,
     ):
         """
-        Handle a failed authentication attempt.
+        Handle an authentication failure.
 
-        IMPORTANT:
+        This intentionally does NOT communicate with greetd.
 
-        Do NOT call greetd.cancel_session() here.
-
-        When greetd returns auth_error, the session has already failed
-        and greetd automatically cancels the session. Calling
-        cancel_session() afterwards can result in another IPC request
-        against a session/socket that is no longer available.
+        The stale session is cancelled at the beginning of the NEXT
+        attempt_login(), before create_session().
         """
 
         self.sys_msg = msg

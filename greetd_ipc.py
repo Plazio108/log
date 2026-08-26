@@ -18,20 +18,11 @@ class GreetdClient:
     """
     Client for the greetd IPC protocol.
 
-    Protocol:
-        <4-byte native-endian payload length><UTF-8 JSON payload>
+    A single connection is kept open for the lifetime of the greeter,
+    just like nwg-hello.
 
-    Authentication errors (error_type == "auth_error") are returned as
-    normal responses because greetd considers them a normal authentication
-    failure rather than a fatal IPC error.
-
-    A general greetd error (error_type == "error") is raised as GreetdError.
-
-    Based on the current greetd IPC protocol:
-        create_session
-        post_auth_message_response
-        start_session
-        cancel_session
+    auth_error is returned as a normal response because it represents
+    failed authentication, not a fatal IPC error.
     """
 
     def __init__(self, sock_path: Optional[str] = None):
@@ -45,10 +36,6 @@ class GreetdClient:
 
         self.sock: Optional[socket.socket] = None
 
-    # ------------------------------------------------------------------
-    # Connection handling
-    # ------------------------------------------------------------------
-
     def __enter__(self):
         self.connect()
         return self
@@ -56,9 +43,11 @@ class GreetdClient:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
-    def connect(self) -> None:
-        """Connect to the greetd Unix socket."""
+    # ================================================================
+    # Connection
+    # ================================================================
 
+    def connect(self):
         if self.sock is not None:
             return
 
@@ -75,18 +64,16 @@ class GreetdClient:
 
         self.sock = sock
 
-    def close(self) -> None:
-        """Close the greetd connection."""
-
+    def close(self):
         if self.sock is not None:
             try:
                 self.sock.close()
             finally:
                 self.sock = None
 
-    # ------------------------------------------------------------------
+    # ================================================================
     # Low-level protocol
-    # ------------------------------------------------------------------
+    # ================================================================
 
     def _require_socket(self) -> socket.socket:
         if self.sock is None:
@@ -94,12 +81,12 @@ class GreetdClient:
 
         return self.sock
 
-    def _send(self, data: Dict[str, Any]) -> None:
+    def _send(self, data: Dict[str, Any]):
         """
-        Send one greetd request.
+        Send one greetd IPC request.
 
-        greetd expects:
-            uint32 native-endian payload length
+        Protocol:
+            4-byte native-endian payload length
             UTF-8 JSON payload
         """
 
@@ -122,8 +109,8 @@ class GreetdClient:
         """
         Receive exactly `size` bytes.
 
-        socket.recv() is allowed to return fewer bytes than requested,
-        so using a single recv(4) for the header is not safe.
+        AF_UNIX SOCK_STREAM is still a stream, so recv() is not
+        guaranteed to return the complete requested amount.
         """
 
         sock = self._require_socket()
@@ -141,8 +128,6 @@ class GreetdClient:
         return bytes(data)
 
     def _recv(self) -> Dict[str, Any]:
-        """Receive and decode one greetd response."""
-
         header = self._recv_exact(4)
 
         length = struct.unpack(
@@ -154,11 +139,14 @@ class GreetdClient:
 
         try:
             response = json.loads(payload.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+        ) as exc:
             raise ConnectionError(f"Invalid JSON received from greetd: {exc}") from exc
 
         if not isinstance(response, dict):
-            raise ConnectionError("Invalid response from greetd: expected JSON object.")
+            raise ConnectionError("Invalid greetd response: expected JSON object.")
 
         return response
 
@@ -167,15 +155,10 @@ class GreetdClient:
         req: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Send a request and receive its response.
+        Send a request and return its response.
 
         IMPORTANT:
-
-        greetd's `auth_error` is deliberately NOT converted into
-        GreetdError. It is a normal authentication failure and the
-        caller needs to be able to handle it.
-
-        A general greetd `error` is still raised.
+        auth_error is deliberately returned instead of raised.
         """
 
         self._send(req)
@@ -193,37 +176,26 @@ class GreetdClient:
                 "No description provided.",
             )
 
-            # auth_error means the password/authentication failed.
-            #
-            # This is explicitly a non-fatal error in the greetd
-            # protocol and should be handled by the greeter.
+            # Authentication failure is part of the normal
+            # authentication flow.
             if error_type == "auth_error":
                 return response
 
             raise GreetdError(
-                error_type=error_type,
-                description=description,
+                error_type,
+                description,
             )
 
         return response
 
-    # ------------------------------------------------------------------
-    # Protocol requests
-    # ------------------------------------------------------------------
+    # ================================================================
+    # greetd requests
+    # ================================================================
 
     def create_session(
         self,
         username: str,
     ) -> Dict[str, Any]:
-        """
-        Create a session and begin authentication.
-
-        Returns either:
-            success
-            auth_message
-            auth_error
-        """
-
         return self.send_request(
             {
                 "type": "create_session",
@@ -235,15 +207,6 @@ class GreetdClient:
         self,
         response: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """
-        Answer the current authentication message.
-
-        Returns either:
-            success
-            auth_message
-            auth_error
-        """
-
         return self.send_request(
             {
                 "type": "post_auth_message_response",
@@ -256,99 +219,68 @@ class GreetdClient:
         cmd: List[str],
         env: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """
-        Start the authenticated session.
 
-        This should only be called after authentication returned
-        `success`.
-        """
-
-        req: Dict[str, Any] = {
+        request: Dict[str, Any] = {
             "type": "start_session",
             "cmd": cmd,
         }
 
         if env is not None:
-            req["env"] = env
+            request["env"] = env
 
-        return self.send_request(req)
+        return self.send_request(request)
 
     def cancel_session(self) -> Dict[str, Any]:
-        """
-        Cancel the session currently under configuration.
-
-        IMPORTANT:
-        This should only be used while the session is still active.
-
-        greetd automatically cancels a session when an error occurs,
-        including an authentication error, so callers should NOT call
-        this after receiving auth_error.
-        """
-
         return self.send_request(
             {
                 "type": "cancel_session",
             }
         )
 
-    # ------------------------------------------------------------------
-    # High-level authentication helper
-    # ------------------------------------------------------------------
+    # ================================================================
+    # High-level authentication
+    # ================================================================
 
     def authenticate(
         self,
         username: str,
-        prompt_handler: Callable[[str, str], Optional[str]],
+        prompt_handler: Callable[
+            [str, str],
+            Optional[str],
+        ],
     ) -> bool:
-        """
-        Perform a complete authentication flow.
 
-        prompt_handler receives:
-
-            (message, message_type)
-
-        where message_type is one of:
-
-            visible
-            secret
-            info
-            error
-
-        Returns True on successful authentication.
-
-        Returns False on authentication failure.
-
-        Raises GreetdError / ConnectionError on actual IPC failures.
-        """
+        # Important: cancel any previous/stale session first.
+        #
+        # This is what nwg-hello does before create_session().
+        try:
+            self.cancel_session()
+        except Exception:
+            # There may simply be no session to cancel.
+            pass
 
         response = self.create_session(username)
 
         while response.get("type") == "auth_message":
-            msg = response.get(
+            message = response.get(
                 "auth_message",
                 "",
             )
 
-            msg_type = response.get(
+            message_type = response.get(
                 "auth_message_type",
                 "visible",
             )
 
-            if msg_type in ("info", "error"):
-                prompt_handler(
-                    msg,
-                    msg_type,
-                )
-
-                response = self.post_auth_message_response()
-
+            if message_type in ("info", "error"):
+                answer = None
             else:
-                user_input = prompt_handler(
-                    msg,
-                    msg_type,
+                answer = prompt_handler(
+                    message,
+                    message_type,
                 )
 
-                response = self.post_auth_message_response(user_input)
+            response = self.post_auth_message_response(answer)
 
         if (
             response.get("type") == "error"
