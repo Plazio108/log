@@ -408,16 +408,28 @@ class AuthLogicWidget(BaseWidget):
             config["layout"]["msg_y"],
             config["layout"]["z_ui_elements"],
         )
+
         self.sys_msg = config["system"]["empty_string"]
         self.msg_is_error = False
 
     def draw(self, canvas, config):
         if not self.sys_msg:
             return
-        lyt, thm = config["layout"], config["theme"]
-        c_x, c_y = self.get_coords(canvas, lyt["box_width"], lyt["box_height"], config)
+
+        lyt, thm = (
+            config["layout"],
+            config["theme"],
+        )
+
+        c_x, c_y = self.get_coords(
+            canvas,
+            lyt["box_width"],
+            lyt["box_height"],
+            config,
+        )
 
         m_col = thm["text_error"] if self.msg_is_error else thm["text_success"]
+
         canvas.put_str(
             self.left,
             self.top,
@@ -431,49 +443,204 @@ class AuthLogicWidget(BaseWidget):
     def attempt_login(self, engine):
         w_user = engine.get_widget("input_user")
         w_pass = engine.get_widget("input_pass")
+
         if not w_user or not w_pass or not w_user.value or not w_pass.value:
             return
 
-        txt, sys_cfg = engine.config["text"], engine.config["system"]
+        txt = engine.config["text"]
+        sys_cfg = engine.config["system"]
+
         self.sys_msg = txt["msg_authenticating"]
         self.msg_is_error = False
+
         engine.force_draw()
 
-        logger.info(f"Attempting login for user: {w_user.value}")
+        username = w_user.value
+        password = w_pass.value
+
+        logger.info(f"Attempting login for user: {username}")
 
         try:
-            resp = engine.greetd.create_session(w_user.value)
+            # ----------------------------------------------------------
+            # Start authentication
+            # ----------------------------------------------------------
+
+            resp = engine.greetd.create_session(username)
+
+            # ----------------------------------------------------------
+            # Process PAM authentication messages.
+            #
+            # greetd does not guarantee that there is only one
+            # auth_message, nor does it guarantee that the first one
+            # will be a password prompt.
+            # ----------------------------------------------------------
+
             while resp.get("type") == "auth_message":
-                msg_type = resp.get("auth_message_type", "visible")
+                msg_type = resp.get(
+                    "auth_message_type",
+                    "visible",
+                )
+
+                msg = resp.get(
+                    "auth_message",
+                    "",
+                )
+
+                logger.debug(f"greetd auth message: type={msg_type!r}, message={msg!r}")
+
                 if msg_type == "secret":
-                    resp = engine.greetd.post_auth_message_response(w_pass.value)
+                    # Password / other hidden credential.
+                    response = password
+
+                elif msg_type == "visible":
+                    # Visible input such as a username, OTP, etc.
+                    #
+                    # This preserves your current behavior for the
+                    # simple username/password PAM setup.
+                    response = username
+
                 elif msg_type in ("info", "error"):
-                    resp = engine.greetd.post_auth_message_response(None)
+                    # Informational/error PAM messages don't require
+                    # an actual response.
+                    response = None
+
                 else:
-                    resp = engine.greetd.post_auth_message_response(w_user.value)
+                    logger.error(f"Unknown greetd auth message type: {msg_type!r}")
+
+                    self._fail(
+                        txt["msg_fail"],
+                        w_pass,
+                        engine,
+                    )
+
+                    return
+
+                resp = engine.greetd.post_auth_message_response(response)
+
+                # ------------------------------------------------------
+                # Authentication failure.
+                #
+                # This is NOT an exception anymore.
+                #
+                # greetd automatically cancels the session when an
+                # authentication error occurs, so DO NOT call
+                # cancel_session() here.
+                # ------------------------------------------------------
+
+                if (
+                    resp.get("type") == "error"
+                    and resp.get("error_type") == "auth_error"
+                ):
+                    description = resp.get(
+                        "description",
+                        txt["msg_fail"],
+                    )
+
+                    logger.warning(
+                        f"Authentication failed for {username}: {description}"
+                    )
+
+                    self._fail(
+                        txt["msg_fail"],
+                        w_pass,
+                        engine,
+                    )
+
+                    return
+
+            # ----------------------------------------------------------
+            # Authentication completed.
+            # ----------------------------------------------------------
 
             if resp.get("type") == "success":
                 logger.info(
-                    f"Authentication successful for {w_user.value}. Starting session..."
+                    f"Authentication successful for {username}. Starting session..."
                 )
-                self.sys_msg = txt["msg_success"]
-                engine.force_draw()
-                engine.greetd.start_session(
-                    cmd=sys_cfg["default_session_cmd"], env=sys_cfg.get("env")
-                )
-                engine.running = False
-            else:
-                logger.warning(f"Authentication failed for {w_user.value}")
-                self._fail(txt["msg_fail"], w_pass, engine)
-        except GreetdError as e:
-            logger.error(f"Greetd exception during login: {e.description}")
-            self._fail(e.description, w_pass, engine)
 
-    def _fail(self, msg: str, pass_widget, engine):
+                self.sys_msg = txt["msg_success"]
+                self.msg_is_error = False
+
+                engine.force_draw()
+
+                engine.greetd.start_session(
+                    cmd=sys_cfg["default_session_cmd"],
+                    env=sys_cfg.get("env"),
+                )
+
+                # greetd starts the user session after the greeter
+                # terminates.
+                engine.running = False
+
+                return
+
+            # ----------------------------------------------------------
+            # Unexpected response.
+            # ----------------------------------------------------------
+
+            logger.error(
+                f"Unexpected response from greetd during authentication: {resp!r}"
+            )
+
+            self._fail(
+                txt["msg_fail"],
+                w_pass,
+                engine,
+            )
+
+        except GreetdError as e:
+            # ----------------------------------------------------------
+            # A GreetdError here means a REAL greetd/IPC error.
+            #
+            # auth_error is intentionally not raised by GreetdClient,
+            # because it is part of the normal authentication flow.
+            # ----------------------------------------------------------
+
+            logger.error(f"Greetd exception during login: {e.description}")
+
+            self._fail(
+                e.description,
+                w_pass,
+                engine,
+            )
+
+        except (ConnectionError, OSError) as e:
+            # ----------------------------------------------------------
+            # Actual socket failure.
+            # ----------------------------------------------------------
+
+            logger.error(f"Greetd IPC connection error during login: {e}")
+
+            self._fail(
+                txt["msg_fail"],
+                w_pass,
+                engine,
+            )
+
+    def _fail(
+        self,
+        msg: str,
+        pass_widget,
+        engine,
+    ):
+        """
+        Handle a failed authentication attempt.
+
+        IMPORTANT:
+
+        Do NOT call greetd.cancel_session() here.
+
+        When greetd returns auth_error, the session has already failed
+        and greetd automatically cancels the session. Calling
+        cancel_session() afterwards can result in another IPC request
+        against a session/socket that is no longer available.
+        """
+
         self.sys_msg = msg
         self.msg_is_error = True
+
         pass_widget.value = engine.config["system"]["empty_string"]
-        engine.greetd.cancel_session()
+
+        engine.force_draw()
 
 
 # ==========================================

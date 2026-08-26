@@ -52,16 +52,17 @@ CONFIG = {
     },
     "system": {
         "default_session_cmd": [
-            "bash",
-            "-l",
-            "-c",
-            "dbus-run-session Hyprland > /tmp/hyprland.log 2>&1",
+            "/usr/bin/start-hyprland"
+            # "bash",
+            # "-l",
+            # "-c",
+            # "dbus-run-session Hyprland > /tmp/hyprland.log 2>&1",
         ],
-        "env": [
-            "XDG_CURRENT_DESKTOP=Hyprland",
-            "XDG_SESSION_TYPE=wayland",
-            "XDG_SESSION_DESKTOP=Hyprland",
-        ],
+        # "env": [
+        #     "XDG_CURRENT_DESKTOP=Hyprland",
+        #     "XDG_SESSION_TYPE=wayland",
+        #     "XDG_SESSION_DESKTOP=Hyprland",
+        # ],
         "empty_string": "",
     },
 }
